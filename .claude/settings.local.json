@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python create_progress_report.py:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

@@ -27,13 +27,18 @@
 本專案旨在將 [Mandiant capa](https://github.com/mandiant/capa) 規則引擎整合至 EDR (Endpoint Detection and Response) 系統中，實現：
 
 1. **即時威脅偵測**：將靜態分析規則轉換為動態行為監控
-2. **自動化分析**：自動識別惡意程式的能力與技術
-3. **標準化報告**：提供符合 ATT&CK 和 MBC 框架的威脅情報
-4. **可擴展架構**：支援自訂規則和持續更新
+2. **即時威脅阻擋**：偵測到惡意行為時立即阻止程序執行
+3. **自動化響應**：根據規則嚴重性自動執行防禦動作
+4. **標準化報告**：提供符合 ATT&CK 和 MBC 框架的威脅情報
+5. **可擴展架構**：支援自訂規則和持續更新
 
 ### 核心概念
 
-**靜態分析轉動態監控**：capa 原本用於靜態分析可執行檔案，本專案將其規則邏輯轉譯為對 EDR 動態事件流的即時匹配。
+**即時動態防禦**：capa 原本用於靜態分析可執行檔案，本專案將其規則邏輯轉譯為對 EDR 動態事件流的即時匹配與阻擋。當偵測到符合惡意規則的行為時，系統會立即採取防禦措施，包括：
+- 終止惡意程序
+- 阻止危險 API 呼叫
+- 隔離可疑檔案
+- 回滾惡意變更
 
 ### 專案範圍
 
@@ -41,13 +46,14 @@
 - 規則解析與驗證
 - 事件標準化與處理
 - 即時匹配引擎
+- **即時阻擋機制**（新增）
+- **響應動作執行器**（新增）
 - 告警生成與管理
 - 效能監控與最佳化
 
 #### 不包含範圍
 - EDR 基礎設施建置
 - 網路流量分析
-- 檔案系統即時防護（另有專案負責）
 
 ---
 
@@ -58,11 +64,12 @@
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                        EDR 主系統                            │
+│              (Kernel Driver + User Agent)                   │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                    Capa 引擎整合層                           │
+│                 Capa 即時防禦引擎整合層                      │
 ├─────────────────────────────────────────────────────────────┤
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
 │  │ 規則解析器   │  │ 事件抽象層   │  │ 匹配引擎     │      │
@@ -74,6 +81,21 @@
 │  └──────────────────────────────────────────────────┘      │
 │                                                              │
 │  ┌──────────────────────────────────────────────────┐      │
+│  │     ⚡ 即時決策引擎 (Real-time Decision Engine)   │      │
+│  │   - 威脅等級評估                                  │      │
+│  │   - 阻擋策略選擇                                  │      │
+│  │   - 誤報風險評估                                  │      │
+│  └──────────────────────────────────────────────────┘      │
+│                                                              │
+│  ┌──────────────────────────────────────────────────┐      │
+│  │     🛡️ 響應動作執行器 (Response Executor)        │      │
+│  │   - API 呼叫攔截/阻擋                             │      │
+│  │   - 程序終止                                      │      │
+│  │   - 檔案隔離                                      │      │
+│  │   - 記憶體清除                                    │      │
+│  └──────────────────────────────────────────────────┘      │
+│                                                              │
+│  ┌──────────────────────────────────────────────────┐      │
 │  │          告警生成器 (Alert Generator)             │      │
 │  └──────────────────────────────────────────────────┘      │
 └─────────────────────────────────────────────────────────────┘
@@ -81,14 +103,33 @@
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                   EDR 後端處理系統                           │
-│  (告警儲存、分析、視覺化、響應)                              │
+│  (告警儲存、分析、視覺化、響應審計)                          │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### 資料流程
+### 即時阻擋資料流程
 
 ```
-事件源 → 事件標準化 → 評估上下文 → 規則匹配 → 告警生成 → 後端處理
+事件源 → 事件標準化 → 評估上下文 → 規則匹配
+                                      ↓
+                            ┌─────────┴─────────┐
+                            ↓                   ↓
+                      匹配成功              匹配失敗
+                            ↓                   ↓
+                     威脅等級評估           允許執行
+                            ↓
+                ┌───────────┴───────────┐
+                ↓                       ↓
+         高危/關鍵威脅              中/低危威脅
+                ↓                       ↓
+          立即阻擋動作            告警 + 監控
+          (終止/攔截)              (可選阻擋)
+                ↓                       ↓
+          生成阻擋告警            生成偵測告警
+                ↓                       ↓
+          ─────────┴───────────────────┘
+                        ↓
+                  後端記錄與審計
 ```
 
 ---
@@ -300,9 +341,208 @@
 
 ---
 
-### 模組 4：告警生成與管理
+### 模組 4：即時決策與阻擋引擎
 
-#### 4.1 告警生成
+#### 4.1 威脅等級評估
+**功能描述**：當規則匹配成功時，評估威脅的嚴重程度和風險等級
+
+**評估維度**：
+- **規則嚴重性**：基於 ATT&CK/MBC 映射的威脅等級
+  - 關鍵（Critical）：直接威脅系統安全
+  - 高危（High）：可能造成重大損害
+  - 中危（Medium）：需要監控的可疑行為
+  - 低危（Low）：異常但風險較低的行為
+
+- **行為危險度**：分析行為本身的危險性
+  - 檔案加密行為
+  - 記憶體注入
+  - 權限提升
+  - 資料外洩
+  - 系統破壞
+
+- **上下文分析**：考慮程序的整體行為模式
+  - 程序來源是否可信
+  - 行為序列是否符合攻擊鏈
+  - 是否存在多個可疑行為
+
+- **誤報風險評估**：降低誤殺合法程式的機率
+  - 白名單檢查（簽章、雜湊、路徑）
+  - 行為序列合理性分析
+  - 歷史信譽評分
+
+#### 4.2 阻擋策略選擇
+**功能描述**：根據威脅等級選擇適當的響應策略
+
+**阻擋策略**：
+
+1. **立即終止（Kill）**
+   - **觸發條件**：關鍵威脅 + 高危行為 + 低誤報風險
+   - **動作**：立即終止程序
+   - **適用場景**：
+     - 勒索軟體加密行為
+     - 記憶體注入到系統程序
+     - 批量檔案刪除
+     - 清除系統還原點
+
+2. **API 攔截（Block）**
+   - **觸發條件**：高危威脅 + 特定危險 API
+   - **動作**：阻止特定 API 呼叫但不終止程序
+   - **適用場景**：
+     - 嘗試停用防毒軟體
+     - 嘗試修改關鍵登錄檔
+     - 嘗試建立服務
+     - 嘗試讀取敏感資料
+
+3. **程序掛起（Suspend）**
+   - **觸發條件**：高危威脅 + 中等誤報風險
+   - **動作**：暫停程序執行，等待分析或使用者決策
+   - **適用場景**：
+     - 可疑但未確認的威脅
+     - 需要進一步分析的行為
+     - 可能誤報的高危行為
+
+4. **監控模式（Monitor）**
+   - **觸發條件**：中/低危威脅
+   - **動作**：允許執行但加強監控
+   - **適用場景**：
+     - 異常但可能合法的行為
+     - 學習模式下的新規則
+     - 低風險探測行為
+
+5. **檔案隔離（Quarantine）**
+   - **觸發條件**：高危威脅 + 檔案相關行為
+   - **動作**：移動檔案至隔離區
+   - **適用場景**：
+     - 投放惡意檔案
+     - 建立可執行檔
+     - 修改系統檔案
+
+#### 4.3 決策引擎實作
+**功能描述**：實作決策邏輯和策略管理
+
+**決策流程**：
+```
+規則匹配成功
+    ↓
+提取規則元資料（ATT&CK、MBC、severity）
+    ↓
+分析行為上下文（程序資訊、行為序列）
+    ↓
+計算威脅分數（0-100）
+    ↓
+查詢白名單/黑名單
+    ↓
+評估誤報風險
+    ↓
+選擇阻擋策略
+    ↓
+檢查策略執行前提條件
+    ↓
+執行響應動作
+```
+
+**配置選項**：
+- 全域阻擋開關（啟用/停用）
+- 按規則類型配置策略
+- 按程序路徑配置策略
+- 白名單管理
+- 威脅分數閾值設定
+
+---
+
+### 模組 5：響應動作執行器
+
+#### 5.1 API 攔截與阻擋
+**功能描述**：在 API 呼叫層面攔截並阻止危險操作
+
+**實作方式**：
+- **Kernel Hook**：在核心層攔截系統呼叫
+- **User-mode Hook**：在使用者層攔截 API 呼叫
+- **返回值偽造**：讓惡意程式以為 API 呼叫成功
+
+**支援的 API 類別**：
+- **程序操作**：CreateProcess、OpenProcess、TerminateProcess
+- **檔案操作**：CreateFile、WriteFile、DeleteFile
+- **登錄檔操作**：RegCreateKey、RegSetValue、RegDeleteKey
+- **網路操作**：socket、connect、send
+- **記憶體操作**：VirtualAllocEx、WriteProcessMemory
+- **服務操作**：CreateService、OpenSCManager
+
+**阻擋模式**：
+- **同步阻擋**：立即回傳錯誤碼（如 ACCESS_DENIED）
+- **非同步阻擋**：延遲回傳或超時
+- **欺騙模式**：回傳假成功但不執行
+
+#### 5.2 程序終止
+**功能描述**：終止惡意程序及其子程序
+
+**終止策略**：
+- **優雅終止**：嘗試正常關閉（TerminateProcess）
+- **強制終止**：核心層終止（ZwTerminateProcess）
+- **程序樹終止**：終止所有子程序
+- **防護機制**：防止惡意程序重新啟動
+
+**安全措施**：
+- 防止終止關鍵系統程序（csrss.exe、smss.exe 等）
+- 防止終止自身和 EDR Agent
+- 記錄終止操作供審計
+
+#### 5.3 檔案隔離
+**功能描述**：將可疑檔案移動至隔離區
+
+**隔離流程**：
+1. 建立檔案快照（備份）
+2. 加密檔案內容
+3. 移動至隔離目錄
+4. 更新檔案索引
+5. 記錄隔離資訊
+
+**隔離目錄**：
+- 路徑：`C:\ProgramData\EDR\Quarantine\`
+- 權限：僅 SYSTEM 可存取
+- 加密：AES-256 加密
+- 保留時間：可配置（預設 30 天）
+
+**還原功能**：
+- 支援從隔離區還原檔案
+- 需要管理員權限
+- 記錄還原操作
+
+#### 5.4 記憶體清除
+**功能描述**：清除程序記憶體中的惡意程式碼
+
+**清除操作**：
+- **shellcode 清除**：覆寫記憶體中的 shellcode
+- **注入 DLL 卸載**：卸載注入的惡意 DLL
+- **記憶體頁面保護**：修改記憶體頁面權限
+
+#### 5.5 系統還原
+**功能描述**：回滾惡意變更
+
+**支援的還原操作**：
+- **登錄檔還原**：恢復被修改的登錄檔項
+- **檔案還原**：恢復被刪除或修改的檔案
+- **服務還原**：恢復服務配置
+- **排程任務還原**：移除惡意排程任務
+
+**實作機制**：
+- 維護系統變更日誌
+- 建立還原點
+- 支援選擇性還原
+
+#### 5.6 網路隔離
+**功能描述**：切斷惡意程序的網路連線
+
+**隔離方式**：
+- **防火牆規則**：動態新增防火牆阻擋規則
+- **連線終止**：強制關閉現有連線
+- **DNS 攔截**：阻止 DNS 解析
+
+---
+
+### 模組 6：告警生成與管理
+
+#### 6.1 告警生成
 **功能描述**：當規則匹配成功時生成結構化告警
 
 **告警內容**：
@@ -314,7 +554,7 @@
 - MBC 行為映射
 - 嚴重性評分
 
-#### 4.2 告警去重
+#### 6.2 告警去重
 **功能描述**：避免重複告警淹沒系統
 
 **去重策略**：
@@ -323,7 +563,7 @@
 - 記錄重複次數作為額外資訊
 - 支援告警聚合
 
-#### 4.3 告警傳送
+#### 6.3 告警傳送
 **功能描述**：將告警傳送至後端系統
 
 **傳送機制**：
@@ -336,9 +576,9 @@
 
 ---
 
-### 模組 5：效能監控
+### 模組 7：效能監控
 
-#### 5.1 效能指標收集
+#### 7.1 效能指標收集
 **功能描述**：收集引擎運行的效能數據
 
 **監控指標**：
@@ -350,7 +590,7 @@
 - **快取命中率**：各級快取的命中率
 - **佇列深度**：待處理事件佇列長度
 
-#### 5.2 效能報告與告警
+#### 7.2 效能報告與告警
 **功能描述**：輸出效能數據並在異常時告警
 
 **輸出方式**：
@@ -358,6 +598,360 @@
 - 支援 Prometheus 格式匯出
 - 提供 HTTP 健康檢查端點
 - 效能異常時發送告警（例如：延遲過高、記憶體洩漏）
+
+---
+
+### 模組 8：整合與配置
+
+#### 8.1 EDR 事件源整合
+**功能描述**：與 EDR 系統的事件源進行整合
+
+**整合方式**：
+- **核心驅動整合**：接收來自核心驅動的事件（程序、檔案、登錄檔、網路）
+- **ETW (Event Tracing for Windows) 整合**：訂閱 Windows ETW 事件
+- **Hook 引擎整合**：接收 API Hook 產生的事件
+- **事件過濾**：在源頭過濾不相關事件，減少處理負擔
+
+**事件類型對應**：
+```
+EDR 事件類型           →  Capa 事件類型
+ProcessCreate          →  process/create
+ProcessTerminate       →  process/terminate
+FileCreate             →  file/create
+FileWrite              →  file/write
+RegistrySetValue       →  registry/set
+NetworkConnect         →  network/connect
+ThreadCreate           →  thread/create
+MemoryAllocate         →  memory/allocate
+```
+
+#### 8.2 配置管理
+**功能描述**：提供靈活的配置選項
+
+**配置檔案格式**：JSON 或 YAML
+
+**主要配置項**：
+```yaml
+engine:
+  # 規則設定
+  rules:
+    directory: "C:/EDR/capa-rules"
+    auto_reload: true
+    reload_interval: 300  # 秒
+    enabled_namespaces:
+      - "malware"
+      - "anti-analysis"
+      - "persistence"
+
+  # 效能設定
+  performance:
+    max_concurrent_evaluations: 100
+    event_queue_size: 10000
+    memory_scan_timeout: 5000
+    cache_size_mb: 512
+
+  # 阻擋設定
+  blocking:
+    enabled: true
+    mode: "automatic"  # automatic, manual, learning
+    default_action: "monitor"  # kill, block, suspend, monitor, quarantine
+
+  # 告警設定
+  alert:
+    endpoint: "https://siem.company.com/api/alerts"
+    batch_size: 100
+    send_interval: 10  # 秒
+    deduplication_window: 300  # 秒
+    retry_count: 3
+
+  # 日誌設定
+  logging:
+    level: "INFO"  # DEBUG, INFO, WARN, ERROR
+    file: "C:/EDR/logs/capa-engine.log"
+    max_size_mb: 100
+    max_files: 10
+```
+
+#### 8.3 規則管理
+**功能描述**：提供規則的生命週期管理
+
+**功能清單**：
+- **規則載入**：從本地目錄或遠端伺服器載入規則
+- **規則驗證**：檢查規則語法和語義正確性
+- **規則熱更新**：不停機更新規則集
+- **規則版本控制**：追蹤規則版本和變更歷史
+- **規則選擇性啟用**：根據命名空間或標籤啟用/停用規則
+- **規則統計**：記錄每條規則的匹配次數和效能數據
+
+#### 8.4 白名單與例外管理
+**功能描述**：管理已知良性程式和例外情況
+
+**白名單類型**：
+- **程序路徑白名單**：信任的程式路徑（支援萬用字元）
+- **簽章白名單**：信任的程式碼簽章
+- **規則例外**：針對特定規則的例外清單
+- **組織例外**：組織特定的合法行為例外
+
+**配置範例**：
+```yaml
+whitelist:
+  processes:
+    - path: "C:/Windows/System32/*"
+      signature: "Microsoft Corporation"
+    - path: "C:/Program Files/CompanyApp/*"
+      signature: "Company Name"
+
+  rule_exceptions:
+    - rule: "create-service"
+      processes:
+        - "C:/Admin/ServiceManager.exe"
+    - rule: "registry-persistence"
+      processes:
+        - "C:/Setup/Installer.exe"
+```
+
+---
+
+### 模組 9：引擎 API
+
+#### 9.1 初始化與生命週期管理
+**功能描述**：提供引擎初始化和關閉的 API
+
+**API 定義**：
+```cpp
+class CapaEngine {
+public:
+    // 建構函數，載入配置
+    CapaEngine(const std::string& configPath);
+
+    // 初始化引擎（載入規則、建立執行緒池等）
+    bool initialize();
+
+    // 啟動引擎
+    bool start();
+
+    // 停止引擎（完成待處理事件後停止）
+    void stop();
+
+    // 強制關閉（立即終止，可能丟失事件）
+    void forceShutdown();
+
+    // 取得引擎狀態
+    EngineStatus getStatus() const;
+};
+
+enum class EngineStatus {
+    UNINITIALIZED,  // 未初始化
+    INITIALIZING,   // 初始化中
+    RUNNING,        // 運行中
+    STOPPING,       // 停止中
+    STOPPED,        // 已停止
+    ERROR           // 錯誤狀態
+};
+```
+
+#### 9.2 事件處理 API
+**功能描述**：提供事件提交和處理的 API
+
+**API 定義**：
+```cpp
+class CapaEngine {
+public:
+    // 同步處理單一事件（阻塞直到處理完成）
+    MatchResult processEventSync(const Event& event);
+
+    // 非同步處理單一事件（立即返回）
+    void processEventAsync(const Event& event,
+                          std::function<void(MatchResult)> callback = nullptr);
+
+    // 批次處理事件
+    std::vector<MatchResult> processBatch(const std::vector<Event>& events);
+
+    // 取得事件佇列狀態
+    QueueStatus getQueueStatus() const;
+};
+
+struct MatchResult {
+    bool matched;                           // 是否匹配規則
+    std::vector<std::string> matchedRules;  // 匹配的規則清單
+    std::string threatLevel;                // 威脅等級
+    std::string recommendedAction;          // 建議動作
+    std::map<std::string, std::string> metadata;  // 額外元資料
+};
+```
+
+#### 9.3 規則管理 API
+**功能描述**：提供規則載入和管理的 API
+
+**API 定義**：
+```cpp
+class CapaEngine {
+public:
+    // 載入單一規則檔案
+    bool loadRule(const std::string& filePath);
+
+    // 載入規則目錄
+    bool loadRulesFromDirectory(const std::string& dirPath,
+                               const RuleFilter& filter = RuleFilter::all());
+
+    // 從遠端載入規則
+    bool loadRulesFromRemote(const std::string& url,
+                            const std::string& authToken = "");
+
+    // 卸載特定規則
+    bool unloadRule(const std::string& ruleName);
+
+    // 啟用/停用規則
+    bool enableRule(const std::string& ruleName, bool enable);
+
+    // 取得已載入規則清單
+    std::vector<RuleInfo> getLoadedRules() const;
+
+    // 取得規則統計資訊
+    RuleStatistics getRuleStatistics(const std::string& ruleName) const;
+};
+
+struct RuleInfo {
+    std::string name;
+    std::string namespace_;
+    std::string description;
+    bool enabled;
+    int matchCount;
+    double avgEvaluationTime;
+};
+```
+
+#### 9.4 配置管理 API
+**功能描述**：提供執行時配置修改的 API
+
+**API 定義**：
+```cpp
+class CapaEngine {
+public:
+    // 更新配置（部分配置需要重啟生效）
+    bool updateConfig(const EngineConfig& newConfig);
+
+    // 取得當前配置
+    EngineConfig getConfig() const;
+
+    // 設定阻擋模式
+    bool setBlockingMode(BlockingMode mode);
+
+    // 設定日誌級別
+    bool setLogLevel(LogLevel level);
+
+    // 重新載入配置檔案
+    bool reloadConfigFromFile();
+};
+
+enum class BlockingMode {
+    DISABLED,    // 停用阻擋
+    LEARNING,    // 學習模式（僅記錄）
+    AUTOMATIC    // 自動阻擋
+};
+```
+
+#### 9.5 統計與監控 API
+**功能描述**：提供引擎統計和監控資訊的 API
+
+**API 定義**：
+```cpp
+class CapaEngine {
+public:
+    // 取得引擎統計資訊
+    EngineStatistics getStatistics() const;
+
+    // 重置統計計數器
+    void resetStatistics();
+
+    // 取得效能指標
+    PerformanceMetrics getPerformanceMetrics() const;
+
+    // 匯出 Prometheus 格式指標
+    std::string exportPrometheusMetrics() const;
+};
+
+struct EngineStatistics {
+    uint64_t totalEventsProcessed;      // 處理的事件總數
+    uint64_t totalMatches;              // 匹配總數
+    uint64_t totalBlocks;               // 阻擋總數
+    double avgProcessingTime;           // 平均處理時間（毫秒）
+    double currentEventsPerSecond;      // 當前事件處理速率
+    size_t queueDepth;                  // 佇列深度
+    size_t activeEvaluations;           // 進行中的評估數
+};
+
+struct PerformanceMetrics {
+    double cpuUsagePercent;             // CPU 使用率
+    size_t memoryUsageBytes;            // 記憶體使用量
+    double cacheHitRate;                // 快取命中率
+    double p50Latency;                  // P50 延遲（毫秒）
+    double p95Latency;                  // P95 延遲（毫秒）
+    double p99Latency;                  // P99 延遲（毫秒）
+};
+```
+
+#### 9.6 告警訂閱 API
+**功能描述**：提供告警訂閱和回調的 API
+
+**API 定義**：
+```cpp
+class CapaEngine {
+public:
+    // 註冊告警回調函數
+    CallbackHandle registerAlertCallback(
+        std::function<void(const CapaMatchAlert&)> callback
+    );
+
+    // 取消註冊回調
+    void unregisterAlertCallback(CallbackHandle handle);
+
+    // 設定告警過濾器
+    void setAlertFilter(const AlertFilter& filter);
+};
+
+struct CapaMatchAlert {
+    std::string alertId;                    // 告警 ID
+    std::string ruleName;                   // 規則名稱
+    std::string ruleNamespace;              // 規則命名空間
+    ProcessInfo processInfo;                // 程序資訊
+    std::string threatLevel;                // 威脅等級
+    std::string recommendedAction;          // 建議動作
+    std::vector<std::string> attackTechniques;  // ATT&CK 技術
+    std::vector<std::string> mbcBehaviors;      // MBC 行為
+    std::string timestamp;                  // 時間戳
+    std::map<std::string, std::string> metadata;  // 額外資訊
+};
+```
+
+#### 9.7 白名單管理 API
+**功能描述**：提供執行時白名單管理的 API
+
+**API 定義**：
+```cpp
+class CapaEngine {
+public:
+    // 添加程序路徑到白名單
+    bool addProcessToWhitelist(const std::string& processPath);
+
+    // 從白名單移除程序
+    bool removeProcessFromWhitelist(const std::string& processPath);
+
+    // 添加規則例外
+    bool addRuleException(const std::string& ruleName,
+                         const std::string& processPath);
+
+    // 移除規則例外
+    bool removeRuleException(const std::string& ruleName,
+                            const std::string& processPath);
+
+    // 取得白名單清單
+    std::vector<std::string> getWhitelist() const;
+
+    // 檢查程序是否在白名單中
+    bool isWhitelisted(const std::string& processPath) const;
+};
+```
 
 ---
 
